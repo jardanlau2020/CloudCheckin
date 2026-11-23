@@ -23,6 +23,56 @@ TRUNCATION_SUFFIX = "\n... [message truncated]"
 HTTP_ERROR_DETAIL_LIMIT = 240
 
 
+_SUCCESS_TEXT = ("成功", "已签到", "签到成功", "已领取", "success", "already")
+_FAIL_TEXT = ("失败", "未登录", "请先登录", "expired", "error", "invalid", "forbidden")
+
+
+def classify_checkin(status_code, response_text):
+    """判定签到是否真的成功（2026-11-23）。
+
+    只看 HTTP 200 不够：登录态失效时接口常回 200 + HTML，或 200 + 业务失败 JSON。
+    返回 ``(ok, detail)``；无法确认时返回 ``(False, 原因)``，宁可告警也不假成功。
+    """
+    text = str(response_text or "").strip()
+    if status_code != 200:
+        return False, "HTTP %s" % status_code
+    if not text:
+        return False, "HTTP 200 但响应体为空，无法确认"
+    if text.startswith("<"):
+        return False, "HTTP 200 返回 HTML（登录态可能失效）"
+
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        parsed = None
+
+    if isinstance(parsed, dict):
+        for key in ("success", "ok"):
+            value = parsed.get(key)
+            if isinstance(value, bool):
+                return value, "响应体 %s=%s" % (key, value)
+        code = parsed.get("code")
+        if code in (0, "0", 200, "200"):
+            return True, "响应体 code=%s" % code
+        if code not in (None, ""):
+            return False, "响应体 code=%s" % code
+        message = str(parsed.get("message") or parsed.get("msg") or "").strip()
+        if message:
+            low = message.lower()
+            if any(k in low for k in _SUCCESS_TEXT):
+                return True, "响应体 message=%s" % message[:40]
+            if any(k in low for k in _FAIL_TEXT):
+                return False, "响应体 message=%s" % message[:40]
+
+    low = text.lower()
+    if any(k in low for k in _SUCCESS_TEXT):
+        return True, "响应体含成功标记"
+    if any(k in low for k in _FAIL_TEXT):
+        return False, "响应体含失败标记: %s" % text[:80]
+    return False, "HTTP 200 但无法确认成功: %s" % text[:80]
+
+
 def summarize_http_failure(status_code, response_text):
     """Return a compact, notification-safe summary of an HTTP failure."""
     text = str(response_text or "").strip()
