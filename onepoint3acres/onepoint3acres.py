@@ -15,6 +15,9 @@ load_dotenv()
 # 2Captcha 验证失败时最多重试次数（含首次，默认 3 次）
 MAX_CAPTCHA_RETRIES = 3
 
+# 签到接口在「今天已经签过」时也回 errno != 0，这属于幂等成功，不是失败
+ALREADY_CHECKED_IN_HINTS = ("已经签到", "已签到", "重复签到", "签到过了")
+
 class OnePointThreeAcres:
 	def __init__(self, cookie: str, solver: TwoCaptcha):
 		self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -76,6 +79,19 @@ class OnePointThreeAcres:
 			if self._is_captcha_error(response.text):
 				print(f"  Checkin captcha error (attempt {attempt}): {resp_json.get('msg')}", flush=True)
 				continue
+			# 2026-11-23：200 不等于签到成功。以前只判 HTTP 200 就 return True，
+			# 业务层拒签（errno != 0）也算成功，run 永远绿。改成按同文件
+			# get_daily_task_answer() 同一标准校验 errno/msg。
+			msg = str(resp_json.get("msg", ""))
+			if resp_json.get("errno") != 0 or resp_json.get("msg") != "OK":
+				if any(h in msg for h in ALREADY_CHECKED_IN_HINTS):
+					# 幂等：今天已经签过，目标已达成，不算失败
+					print(f"  Checkin already done today: {msg}", flush=True)
+					self.messages.append(msg)
+					return True
+				print(f"  Checkin rejected: errno={resp_json.get('errno')} msg={msg}", flush=True)
+				self.messages.append(msg)
+				return False
 
 			self.messages.append(resp_json.get("msg", ""))
 			return True
