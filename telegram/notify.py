@@ -43,6 +43,74 @@ def summarize_http_failure(status_code, response_text):
     return f"{summary}: {detail}" if detail else summary
 
 
+CHECKIN_SUCCESS_BOOL_KEYS = (
+    "success", "ok", "checked", "checked_in", "already", "already_checked",
+    "signed", "is_success", "checkin", "attendance",
+)
+CHECKIN_SUCCESS_MARKERS = (
+    "success", "checked in", "already checked", "already signed",
+    "check-in successful", "checkin successful", "签到成功", "已签到", "已打卡",
+)
+CHECKIN_LOGIN_MARKERS = (
+    "需要先登录", "请先登录", "未登录", "登录已失效", "cookie is expired",
+    "login required", "please log in", "please login", "not logged in",
+    "sign in to continue", "unauthorized", "invalid cookie",
+)
+
+
+def classify_checkin_result(status_code, response_text):
+    """把一次签到响应判成 success / already / failure / unknown。
+
+    2026-11-23 修假成功：HTTP 200 只说明请求通了 —— cookie 失效时站点常以 200
+    返回登录页或 ``{"success": false}``，旧实现一律当成功。这里先看状态码，
+    再解析响应体：JSON 布尔字段 > 登录失效文案 > 成功/已签文案 > 其余判 unknown
+    （宁可报未知，也不把没签到当成功）。
+
+    Returns:
+        tuple[str, str]: (verdict, detail)，verdict ∈ {success, already, failure, unknown}
+    """
+    text = str(response_text or "")
+    low = text.lower()
+
+    if status_code != 200:
+        return "failure", summarize_http_failure(status_code, text)
+
+    # cookie 失效时常见：200 + HTML 登录页
+    if low.lstrip().startswith("<"):
+        return "failure", "HTML response (cookie expired or redirected to login page)"
+
+    data = None
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        data = None
+
+    if isinstance(data, dict):
+        for key in CHECKIN_SUCCESS_BOOL_KEYS:
+            value = data.get(key)
+            if isinstance(value, bool):
+                return ("success" if value else "failure"), f"{key}={value}"
+        nested = data.get("data")
+        if isinstance(nested, dict):
+            for key in CHECKIN_SUCCESS_BOOL_KEYS:
+                value = nested.get(key)
+                if isinstance(value, bool):
+                    return ("success" if value else "failure"), f"data.{key}={value}"
+        message = str(data.get("message") or data.get("msg") or data.get("error") or "").strip()
+        if message:
+            low = f"{low} {message.lower()}"
+
+    if any(marker in low for marker in CHECKIN_LOGIN_MARKERS):
+        return "failure", "response indicates an expired login / cookie"
+    if "already" in low or "已签到" in low or "已打卡" in low:
+        return "already", "already checked in"
+    if any(marker in low for marker in CHECKIN_SUCCESS_MARKERS):
+        return "success", "response body confirms the check-in"
+
+    snippet = " ".join(text.split())[:HTTP_ERROR_DETAIL_LIMIT]
+    return "unknown", f"HTTP 200 but no success field in body: {snippet or '(empty)'}"
+
+
 def format_source_notification(source, messages, now=None):
     """Format one compact Telegram notification for a platform run."""
     if isinstance(messages, str):

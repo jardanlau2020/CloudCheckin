@@ -3,7 +3,7 @@ from curl_cffi import requests
 import random
 import time
 from dotenv import load_dotenv
-from telegram.notify import send_source_notification, summarize_http_failure
+from telegram.notify import classify_checkin_result, send_source_notification
 
 load_dotenv()
 
@@ -45,11 +45,18 @@ def main():
             print(f"Account {account} status code: {response.status_code}", flush=True)
             print(f"Account {account} response: {response.text}", flush=True)
 
-            if response.status_code == 200:
+            # 2026-11-23 修假成功：不再「HTTP 200 即成功」。
+            # 200 之后再解析响应体（JSON 布尔字段 / 成功或已签文案），解析不出就判 UNKNOWN。
+            verdict, detail = classify_checkin_result(response.status_code, response.text)
+            if verdict == "success":
                 result = f"Account {account}: check-in successful"
+            elif verdict == "already":
+                result = f"Account {account}: already checked in today"
+            elif verdict == "failure":
+                result = f"Account {account}: check-in failed — {detail}"
+                failed = True
             else:
-                failure = summarize_http_failure(response.status_code, response.text)
-                result = f"Account {account}: check-in failed — {failure}"
+                result = f"Account {account}: check-in UNKNOWN — {detail}"
                 failed = True
         except Exception as exc:
             result = f"Account {account}: check-in error — {exc}"
